@@ -203,34 +203,69 @@ function vitePluginStorageProxy(): Plugin {
   };
 }
 
+const FIREBASE_ENV_FIELDS = {
+  apiKey: "FIREBASE_API_KEY",
+  authDomain: "FIREBASE_AUTH_DOMAIN",
+  databaseURL: "FIREBASE_DATABASE_URL",
+  projectId: "FIREBASE_PROJECT_ID",
+  storageBucket: "FIREBASE_STORAGE_BUCKET",
+  messagingSenderId: "FIREBASE_MESSAGING_SENDER_ID",
+  appId: "FIREBASE_APP_ID",
+  measurementId: "FIREBASE_MEASUREMENT_ID",
+} as const;
+
+// Optional override file for deployments that cannot use environment variables.
+// Kept out of version control so no credentials live in the source tree.
+const FIREBASE_CONFIG_FILE = "firebase.config.json";
+
+function readFirebaseConfigFile(envDir: string): Record<string, string> | null {
+  const filePath = path.join(envDir, FIREBASE_CONFIG_FILE);
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, string>;
+    }
+  } catch (err) {
+    throw new Error(`Failed to parse ${FIREBASE_CONFIG_FILE}: ${String(err)}`);
+  }
+  return null;
+}
+
+function resolveFirebaseConfig(envDir: string, mode: string): Record<string, string> {
+  const env = loadEnv(mode, envDir, "");
+  const fromFile = readFirebaseConfigFile(envDir);
+
+  const config: Record<string, string> = {};
+  const missing: string[] = [];
+
+  for (const [field, envName] of Object.entries(FIREBASE_ENV_FIELDS)) {
+    const value = env[envName]?.trim() || fromFile?.[field]?.trim();
+    if (!value) {
+      missing.push(envName);
+      continue;
+    }
+    config[field] = value;
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing Firebase configuration: ${missing.join(", ")}. ` +
+        `Provide them as environment variables (e.g. .env.local for local dev or the deployment environment), ` +
+        `or add an untracked ${FIREBASE_CONFIG_FILE} file.`,
+    );
+  }
+
+  return config;
+}
+
 function vitePluginFirebaseEnvConfig(): Plugin {
   let configScript = "";
 
   return {
     name: "firebase-env-config",
     configResolved(config) {
-      const env = loadEnv(config.mode, config.envDir, "");
-      const fields = {
-        apiKey: "FIREBASE_API_KEY",
-        authDomain: "FIREBASE_AUTH_DOMAIN",
-        databaseURL: "FIREBASE_DATABASE_URL",
-        projectId: "FIREBASE_PROJECT_ID",
-        storageBucket: "FIREBASE_STORAGE_BUCKET",
-        messagingSenderId: "FIREBASE_MESSAGING_SENDER_ID",
-        appId: "FIREBASE_APP_ID",
-        measurementId: "FIREBASE_MEASUREMENT_ID",
-      } as const;
-      const missing = Object.values(fields).filter((name) => !env[name]?.trim());
-
-      if (missing.length > 0) {
-        throw new Error(
-          `Missing Firebase environment variables: ${missing.join(", ")}. Add them to .env.local or the deployment environment.`,
-        );
-      }
-
-      const firebaseConfig = Object.fromEntries(
-        Object.entries(fields).map(([field, name]) => [field, env[name]]),
-      );
+      const firebaseConfig = resolveFirebaseConfig(config.envDir, config.mode);
       const serializedConfig = JSON.stringify(firebaseConfig).replace(/</g, "\\u003c");
       configScript = `window.__FIREBASE_CONFIG__ = ${serializedConfig};`;
     },
